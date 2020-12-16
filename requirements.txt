@@ -1,2 +1,3 @@
+git+https://github.com/japaniel/insightvm-python.git
 python-dotenv
 pandas
