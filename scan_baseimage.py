@@ -5,8 +5,9 @@ import logging
 import time
 import re
 import pandas
+import sys
 
-import api_client
+import swagger_client
 from swagger_client import configuration
 from swagger_client.rest import ApiException
 from pprint import pprint
@@ -60,7 +61,7 @@ def find_asset(api_client, identifier ={}):
         api_response = api_instance.find_assets(body, page=os.environ['PAGE'], size=os.environ['SIZE'])
         logging.debug(api_response.resources)
     except ApiException as e:
-        print("Exception when calling AssetApi->find_assets: %s\n" % e)
+        logging.error("Exception when calling AssetApi->find_assets: %s\n" % e)
 
     return api_response.resources
 
@@ -84,18 +85,29 @@ def get_asset(api_client, asset_id):
     
     return api_response
 
-def update_asset(api_client, asset_id, ip):
+def add_or_update_asset(api_client, site_id, hostname, ip):
     """
     Update resource with current asset ip
 
     :param api_client: A valid InsightVM client
-    :param asset_id: the asset desired to update
+    :param site_id: the site the asset does/should be in
     :param ip: the current IP of the asset
     """
 
-    api_client = api_client
-    asset_id = ""
-    ip = os.environ['IP']
+    api_instance = swagger_client.AssetApi(api_client)
+    
+    date = pandas.Timestamp.now('UTC')
+    pprint(date)
+    
+    body = swagger_client.AssetCreate(host_name=hostname, ip=ip, _date="")
+    try:
+        api_response = api_instance.create_asset(site_id, body=body)
+        pprint(api_response)
+    except ApiException as e:
+        logging.error("Exception when calling AssetApi->create_asset: %s\n" % e)
+        sys.exit()
+
+    
 
 def scan_host(api_client, site_id, asset):
     """
@@ -223,6 +235,7 @@ def main():
     # TODO - Cleanup: move to const.py file
     host = os.getenv('HOST')
     SITE_ID = os.environ['SITE_ID']
+    IP = os.environ['IP']
     config = build_config()
 
     api_client = swagger_client.ApiClient(config)
@@ -230,11 +243,11 @@ def main():
     assets = find_asset(api_client, {'host-name': host})
 
     if not assets:
-        logging.error("{} was not found".format(host))
+        logging.warning("{} was not found".format(host))
         logging.info("Adding {} to InsigthVM".format(host))
-        exit
+        # sys.exit()
         # TODO - Feature: add host if it doesn't exist
-        # add_host(api_client, host)
+        add_or_update_asset(api_client, SITE_ID, host, IP)
 
     if assets:
         validated_asset = validate_asset(assets, host, os.getenv('IP'))
