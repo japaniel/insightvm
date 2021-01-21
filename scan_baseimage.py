@@ -6,6 +6,7 @@ import time
 import re
 import pandas
 import sys
+import json
 
 import swagger_client
 from swagger_client import configuration
@@ -74,7 +75,7 @@ def get_asset(api_client, asset_id):
     :params obj api_client: Instance of swagger_client.ApiClient
     :params int asset_id: ID of asset looking for
     """
-    
+
     api_instance = swagger_client.AssetApi(api_client)
 
     try:
@@ -82,8 +83,35 @@ def get_asset(api_client, asset_id):
         api_response = api_instance.get_asset(asset_id)
     except ApiException as e:
         print("Exception when calling AssetApi->get_asset: %s\n" % e)
-    
+
     return api_response
+
+def get_scanned_assets(api_client, site_id, scan_id):
+    """
+    Get assets in a site by id
+    Returns assets in site
+
+    :param obj api_client: 
+    :param int site_id: Site id to retrieve assets from
+    :param int scan_id: Scan ID we just completed
+    """
+    scanned_assets = []
+
+    api_instance = swagger_client.SiteApi(api_client)
+
+    try:
+        api_response = api_instance.get_site_assets(site_id)
+        logging.debug('Response to get_site_assets is %s' % api_response)
+    except ApiException as e:
+        print("Exception when calling SiteApi->get_site_assets: %s\n" % e)
+ 
+    for asset in api_response.resources:
+        for event in asset.history:
+            if event.type == 'SCAN' and event.scan_id == scan_id:
+                logging.info('Found asset:{} that was scanned in scan_id:{}'.format(asset.host_name, scan_id))
+                scanned_assets.append(asset)
+            continue
+    return scanned_assets
 
 def add_or_update_asset(api_client, site_id, hostname, ip):
     """
@@ -95,19 +123,34 @@ def add_or_update_asset(api_client, site_id, hostname, ip):
     """
 
     api_instance = swagger_client.AssetApi(api_client)
-    
-    date = pandas.Timestamp.now('UTC')
-    pprint(date)
-    
+        
     body = swagger_client.AssetCreate(host_name=hostname, ip=ip, _date="")
     try:
         api_response = api_instance.create_asset(site_id, body=body)
-        pprint(api_response)
+        logging.debug(api_response)
     except ApiException as e:
         logging.error("Exception when calling AssetApi->create_asset: %s\n" % e)
         sys.exit()
-
     
+    return ""
+
+def scan_site(api_client, site_id):
+    """
+    Scan a site that is defined in InsightVM by site_id
+    Returns ...
+    :param int site_id: Site ID taken from GUI
+    """
+    api_instance = swagger_client.ScanApi(api_client)
+    
+    try:
+        api_response = api_instance.start_scan(site_id)
+        logging.debug('Results of ScanApi->start_scan of site {} are:\n{}'.format(site_id, api_response))
+    except ApiException as e:
+        logging.error("Exception when calling ScanApi->start_scan: %s\n" % e)
+
+    poll_scan(api_client, api_response.id)
+
+    return api_response.id
 
 def scan_host(api_client, site_id, asset):
     """
@@ -121,7 +164,6 @@ def scan_host(api_client, site_id, asset):
     """
 
     # TODO - check for a running scan
-    # but maybe we don't need this as we checked to see if recently_scanned()
     api_instance = swagger_client.ScanApi(api_client)
     body = swagger_client.AdhocScan() # AdhocScan | The details for the scan. (optional)
 
@@ -155,6 +197,10 @@ def poll_scan(api_client, id =""):
             time.sleep(5)
         except ApiException as e:
             print("Exception when calling ScanApi->get_scan: %s\n" % e)
+    
+    if api_response.assets == 0:
+        logging.error("No assets were scanned in scan {}".format(api_response.id))
+        sys.exit()
 
     return api_response
 
@@ -220,47 +266,55 @@ def validate_asset(assets, search_term, ip_to_scan):
         valid_assets.append(asset)
 
     if len(valid_assets) > 1:
-        logging.debug('Multiple assets were found and duped our validation.\nBe more specific in your search/n{}'.format(assets))
-        exit
+        logging.error('Multiple assets were found and duped our validation.\nBe more specific in your search/n{}'.format(assets))
+        sys.exit()
 
     asset = valid_assets[0]
     return asset
 
+def sort_site_assets(assets):
+    """
+    Sort assets from a site into two lists: Has vulns and no vulns 
+    Returns dictionary with haves and havenots
+
+    :param list assets: list of assets in a Site Scan
+    """
+    sorted_assets = {
+        'haves': [],
+        'havenots': [],
+    }
+
+    for asset in assets:
+        if asset.vulnerabilities.total == 0:
+            sorted_assets['havenots'].append(asset.host_name)
+        else:
+            sorted_assets['haves'].append(asset.host_name)
+    
+    return sorted_assets
+
 def main():
-    # TODO - Feature: accept IP address as argument
     ENV_FILE = dotenv.find_dotenv()
     if ENV_FILE:
         dotenv.load_dotenv(ENV_FILE, override=True)
 
     # TODO - Cleanup: move to const.py file
-    host = os.getenv('HOST')
     SITE_ID = os.environ['SITE_ID']
-    IP = os.environ['IP']
     config = build_config()
 
     api_client = swagger_client.ApiClient(config)
- 
-    assets = find_asset(api_client, {'host-name': host})
 
-    if not assets:
-        logging.warning("{} was not found".format(host))
-        logging.info("Adding {} to InsigthVM".format(host))
-        # sys.exit()
-        # TODO - Feature: add host if it doesn't exist
-        add_or_update_asset(api_client, SITE_ID, host, IP)
+    # Scan baseimage site
+    scan_id = scan_site(api_client, SITE_ID)
 
-    if assets:
-        validated_asset = validate_asset(assets, host, os.getenv('IP'))
+    # Get resources from site
+    scanned_assets = get_scanned_assets(api_client, SITE_ID, scan_id)
 
-    if validated_asset and not recently_scanned(validated_asset):
-        api_response = scan_host(api_client, SITE_ID, validated_asset.id)
-        scan_results = get_asset(api_client, validated_asset.id)
+    sorted_assets = sort_site_assets(scanned_assets)
 
-    if scan_results and scan_results.vulnerabilities.total > 0:
-        logging.error('Scan id:{} came back with vulnerabilities: {}'.format(scan_results.id, api_response))
+    print(json.dumps(sorted_assets))
 
-    # TODO - Cleanup: exit gracefully
-    print("We Passed!")
+    # Jenkins - Create AMI from successful scans
+    # Jenkins - Report Failed scans
 
 if __name__ == '__main__':
     main()
